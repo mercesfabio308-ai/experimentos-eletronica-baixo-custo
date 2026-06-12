@@ -1,0 +1,454 @@
+#include <MD_MAX72xx.h>
+#include <SPI.h>
+
+// =====================================================
+// MATRIZ LED VERTICAL 8x32
+// =====================================================
+
+#define HARDWARE_TYPE MD_MAX72XX::FC16_HW
+#define MAX_DEVICES 4
+#define CS_PIN 10
+
+MD_MAX72XX mx = MD_MAX72XX(HARDWARE_TYPE, CS_PIN, MAX_DEVICES);
+
+// =====================================================
+// BOTÕES
+// =====================================================
+
+const int btnEsq  = 2;
+const int btnDir  = 3;
+const int btnTiro = 4;
+
+// =====================================================
+// BUZZER
+// =====================================================
+
+const int buzzer = 7;
+
+// =====================================================
+// TAMANHO DO JOGO
+// =====================================================
+
+const int largura = 8;
+const int altura  = 32;
+
+// =====================================================
+// CANHÃO
+// =====================================================
+
+int playerX = 3;
+
+// =====================================================
+// TIROS MÚLTIPLOS
+// =====================================================
+
+const int maxTiros = 10;
+
+int tiroX[maxTiros];
+int tiroY[maxTiros];
+
+bool tiroAtivo[maxTiros];
+
+unsigned long tempoTiro = 0;
+
+int velocidadeTiro = 25;
+
+// =====================================================
+// MOVIMENTO SUAVE DO CANHÃO
+// =====================================================
+
+unsigned long tempoMovimento = 0;
+
+// =====================================================
+// INIMIGOS
+// =====================================================
+
+const int maxInimigos = 6;
+
+int inimigoX[maxInimigos];
+int inimigoY[maxInimigos];
+
+bool inimigoAtivo[maxInimigos];
+
+// =====================================================
+// VELOCIDADE
+// =====================================================
+
+int velocidade = 250;
+
+unsigned long ultimoMovimento = 0;
+
+// =====================================================
+// PONTOS
+// =====================================================
+
+int pontos = 0;
+
+// =====================================================
+
+void setup() {
+
+  mx.begin();
+
+  mx.control(MD_MAX72XX::INTENSITY, 5);
+
+  mx.clear();
+
+  pinMode(btnEsq, INPUT_PULLUP);
+  pinMode(btnDir, INPUT_PULLUP);
+  pinMode(btnTiro, INPUT_PULLUP);
+
+  pinMode(buzzer, OUTPUT);
+
+  randomSeed(analogRead(A0));
+
+  // DESATIVA TIROS
+
+  for (int i = 0; i < maxTiros; i++) {
+
+    tiroAtivo[i] = false;
+  }
+
+  // DESATIVA INIMIGOS
+
+  for (int i = 0; i < maxInimigos; i++) {
+
+    inimigoAtivo[i] = false;
+  }
+
+  criarInimigo();
+
+  somInicio();
+}
+
+// =====================================================
+
+void loop() {
+
+  mx.clear();
+
+  // =====================================================
+  // MOVIMENTO SUAVE DO CANHÃO
+  // =====================================================
+
+  if (millis() - tempoMovimento > 60) {
+
+    tempoMovimento = millis();
+
+    // ESQUERDA
+
+    if (digitalRead(btnEsq) == LOW) {
+
+      playerX--;
+
+      if (playerX < 0) {
+
+        playerX = 0;
+      }
+    }
+
+    // DIREITA
+
+    if (digitalRead(btnDir) == LOW) {
+
+      playerX++;
+
+      if (playerX > 7) {
+
+        playerX = 7;
+      }
+    }
+  }
+
+  // =====================================================
+  // NOVO TIRO
+  // =====================================================
+
+  if (digitalRead(btnTiro) == LOW) {
+
+    for (int i = 0; i < maxTiros; i++) {
+
+      if (!tiroAtivo[i]) {
+
+        tiroAtivo[i] = true;
+
+        tiroX[i] = playerX;
+
+        tiroY[i] = 29;
+
+        tone(buzzer, 7000, 20);
+
+        break;
+      }
+    }
+
+    delay(80);
+  }
+
+  // =====================================================
+  // CANHÃO
+  // =====================================================
+
+  desenhar(31, playerX);
+
+  if (playerX > 0)
+    desenhar(31, playerX - 1);
+
+  if (playerX < 7)
+    desenhar(31, playerX + 1);
+
+  desenhar(30, playerX);
+
+  // =====================================================
+  // MOVIMENTO DOS TIROS
+  // =====================================================
+
+  if (millis() - tempoTiro > velocidadeTiro) {
+
+    tempoTiro = millis();
+
+    for (int i = 0; i < maxTiros; i++) {
+
+      if (tiroAtivo[i]) {
+
+        tiroY[i]--;
+      }
+    }
+  }
+
+  // =====================================================
+  // DESENHAR TIROS
+  // =====================================================
+
+  for (int i = 0; i < maxTiros; i++) {
+
+    if (tiroAtivo[i]) {
+
+      desenhar(tiroY[i], tiroX[i]);
+
+      if (tiroY[i] < 0) {
+
+        tiroAtivo[i] = false;
+      }
+    }
+  }
+
+  // =====================================================
+  // MOVIMENTO DOS INIMIGOS
+  // =====================================================
+
+  if (millis() - ultimoMovimento > velocidade) {
+
+    ultimoMovimento = millis();
+
+    for (int i = 0; i < maxInimigos; i++) {
+
+      if (inimigoAtivo[i]) {
+
+        inimigoY[i]++;
+      }
+    }
+
+    criarInimigo();
+  }
+
+  // =====================================================
+  // DESENHAR INIMIGOS
+  // =====================================================
+
+  for (int i = 0; i < maxInimigos; i++) {
+
+    if (inimigoAtivo[i]) {
+
+      desenhar(inimigoY[i], inimigoX[i]);
+
+      // =================================================
+      // COLISÃO
+      // =================================================
+
+      for (int t = 0; t < maxTiros; t++) {
+
+        if (tiroAtivo[t] &&
+            tiroX[t] == inimigoX[i] &&
+            tiroY[t] == inimigoY[i]) {
+
+          explosao(inimigoY[i], inimigoX[i]);
+
+          inimigoAtivo[i] = false;
+
+          tiroAtivo[t] = false;
+
+          pontos++;
+
+          // FICA MAIS DIFÍCIL
+
+          velocidade -= 5;
+
+          if (velocidade < 70) {
+
+            velocidade = 70;
+          }
+
+          // MAIS INIMIGOS
+
+          if (pontos % 5 == 0) {
+
+            criarInimigo();
+          }
+        }
+      }
+
+      // =================================================
+      // GAME OVER
+      // =================================================
+
+      if (inimigoY[i] >= 31) {
+
+        gameOver();
+      }
+    }
+  }
+}
+
+// =====================================================
+// DESENHAR MATRIZ VERTICAL
+// =====================================================
+
+void desenhar(int y, int x) {
+
+  int novoX = x;
+
+  int novoY = 31 - y;
+
+  mx.setPoint(novoX, novoY, true);
+}
+
+// =====================================================
+// CRIAR INIMIGO
+// =====================================================
+
+void criarInimigo() {
+
+  for (int i = 0; i < maxInimigos; i++) {
+
+    if (!inimigoAtivo[i]) {
+
+      inimigoAtivo[i] = true;
+
+      inimigoX[i] = random(0, 8);
+
+      inimigoY[i] = 0;
+
+      break;
+    }
+  }
+}
+
+// =====================================================
+// SOM INICIAL
+// =====================================================
+
+void somInicio() {
+
+  tone(buzzer, 1000);
+  delay(100);
+
+  tone(buzzer, 2000);
+  delay(100);
+
+  tone(buzzer, 3000);
+  delay(100);
+
+  noTone(buzzer);
+}
+
+// =====================================================
+// EXPLOSÃO
+// =====================================================
+
+void explosao(int y, int x) {
+
+  for (int i = 0; i < 2; i++) {
+
+    mx.clear();
+
+    desenhar(y, x);
+
+    if (x > 0)
+      desenhar(y, x - 1);
+
+    if (x < 7)
+      desenhar(y, x + 1);
+
+    if (y > 0)
+      desenhar(y - 1, x);
+
+    if (y < 31)
+      desenhar(y + 1, x);
+
+    tone(buzzer, 8000);
+
+    delay(20);
+
+    noTone(buzzer);
+
+    delay(20);
+  }
+}
+
+// =====================================================
+// GAME OVER
+// =====================================================
+
+void gameOver() {
+
+  tone(buzzer, 1000);
+  delay(300);
+
+  tone(buzzer, 700);
+  delay(300);
+
+  tone(buzzer, 400);
+  delay(500);
+
+  noTone(buzzer);
+
+  for (int i = 0; i < 4; i++) {
+
+    for (int y = 0; y < 32; y++) {
+
+      for (int x = 0; x < 8; x++) {
+
+        desenhar(y, x);
+      }
+    }
+
+    delay(100);
+
+    mx.clear();
+
+    delay(100);
+  }
+
+  pontos = 0;
+
+  velocidade = 250;
+
+  playerX = 3;
+
+  // LIMPA TIROS
+
+  for (int i = 0; i < maxTiros; i++) {
+
+    tiroAtivo[i] = false;
+  }
+
+  // LIMPA INIMIGOS
+
+  for (int i = 0; i < maxInimigos; i++) {
+
+    inimigoAtivo[i] = false;
+  }
+
+  criarInimigo();
+}

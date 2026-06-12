@@ -1,0 +1,72 @@
+#include <Servo.h>
+
+// ──────────────────────────────────────────
+// HARDWARE
+// Potenciômetro → A4  (entrada analógica)
+// Servo         → 8   (PWM)
+// ──────────────────────────────────────────
+#define PIN_POT   A4
+#define PIN_SERVO 8
+
+Servo meuServo;
+
+// ──────────────────────────────────────────
+// CONFIGURAÇÕES
+// O servo vai de 0° (ré) a 180° (frente)
+// 90° = parado / centro
+// ──────────────────────────────────────────
+const int ANGULO_MIN   = 0;    // ré total
+const int ANGULO_MAX   = 180;  // frente total
+const int ZONA_MORTA   = 5;    // graus em torno de 90° onde fica parado
+
+int anguloAtual = 90;
+int anguloAnterior = 90;
+
+void setup() {
+  meuServo.attach(PIN_SERVO);
+  meuServo.write(90); // começa parado no centro
+
+  Serial.begin(9600);
+  Serial.println("=== SERVO + POTENCIÔMETRO ===");
+  Serial.println("Pot. mínimo  → 0°   (ré)");
+  Serial.println("Pot. centro  → 90°  (parado)");
+  Serial.println("Pot. máximo  → 180° (frente)");
+  Serial.println("=============================");
+}
+
+void loop() {
+  // Lê o potenciômetro (0–1023)
+  int leitura = analogRead(PIN_POT);
+
+  // Converte para ângulo (0° a 180°)
+  int angulo = map(leitura, 0, 1023, ANGULO_MIN, ANGULO_MAX);
+
+  // Zona morta ao redor de 90° para evitar tremido
+  if (angulo > 90 - ZONA_MORTA && angulo < 90 + ZONA_MORTA) {
+    angulo = 90;
+  }
+
+  // Só atualiza se mudou (evita ruído)
+  if (abs(angulo - anguloAnterior) > 1) {
+    meuServo.write(angulo);
+    anguloAnterior = angulo;
+
+    // Log Serial
+    Serial.print("Pot: ");
+    Serial.print(leitura);
+    Serial.print(" | Angulo: ");
+    Serial.print(angulo);
+    Serial.print("° | ");
+
+    if (angulo < 90 - ZONA_MORTA) {
+      Serial.print("← RE");
+    } else if (angulo > 90 + ZONA_MORTA) {
+      Serial.print("→ FRENTE");
+    } else {
+      Serial.print("■ PARADO");
+    }
+    Serial.println();
+  }
+
+  delay(20); // suaviza leitura
+}

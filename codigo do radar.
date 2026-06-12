@@ -1,0 +1,385 @@
+/*
+========================================================
+RADAR ULTRASSÔNICO DE ALTA PRECISÃO
+Arduino UNO + 2 Sensores HC-SR04 + LCD I2C + Buzzer
+
+MELHORIAS DE PRECISÃO v2.0:
+✔ Velocidade do som corrigida por temperatura
+✔ Filtro de mediana (elimina outliers)
+✔ Debounce para evitar falsos positivos
+✔ Cálculo de tempo com micros() estável
+✔ Aceleração calculada corretamente (v²/2d)
+✔ Distância real de 19 cm entre sensores
+✔ Alarme de limite e de saturação do sensor
+
+LIGAÇÕES
+========================================================
+LCD I2C   → SDA=A4  SCL=A5
+Sensor 1  → TRIG=8  ECHO=9
+Sensor 2  → TRIG=10 ECHO=11
+Buzzer    → S=6
+========================================================
+*/
+
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// ================= PINOS =================
+const int TRIG1  = 8;
+const int ECHO1  = 9;
+const int TRIG2  = 10;
+const int ECHO2  = 11;
+const int BUZZER = 6;
+
+// ================= CONFIGURAÇÕES =================
+
+// Distância REAL entre os dois sensores (metros)
+// Meça com régua: da face do sensor 1 à face do sensor 2
+const float DIST_SENSORES = 0.190; // 19,0 cm → 0.190 m
+
+// Temperatura ambiente estimada (ajuste para maior precisão)
+// A cada 1°C de erro → ~0,17% de erro na velocidade
+const float TEMP_CELSIUS = 25.0;
+
+// Limiar de detecção de objeto
+const int DIST_DETECCAO_CM = 12; // cm
+
+// Velocidade limite para alarme
+const float VEL_LIMITE_KMH = 60.0;
+
+// Velocidade máxima confiável do HC-SR04
+// Acima disso o sensor não consegue medir com precisão
+const float VEL_MAX_SENSOR_KMH = 25.0;
+
+// Tempo mínimo entre duas detecções (debounce) em ms
+const unsigned long DEBOUNCE_MS = 80;
+
+// Timeout: se sensor 2 não detectar em X segundos, reseta
+const unsigned long TIMEOUT_US = 5000000UL; // 5 segundos
+
+// ================= VARIÁVEIS DE ESTADO =================
+unsigned long tempoEntrada  = 0;
+unsigned long tempoSaida    = 0;
+unsigned long ultimaDetec1  = 0;
+unsigned long ultimaDetec2  = 0;
+
+bool passouSensor1 = false;
+bool passouSensor2 = false;
+
+// ======================================================
+// VELOCIDADE DO SOM CORRIGIDA POR TEMPERATURA
+// Fórmula: v = 331.3 + 0.606 * T  (m/s)
+// Erro fixo de 343 m/s a 25°C gera ~0.17% de desvio
+// ======================================================
+float velocidadeSom()
+{
+  return 331.3 + (0.606 * TEMP_CELSIUS);
+}
+
+// ======================================================
+// MEDIANA DE 7 LEITURAS
+// Remove outliers causados por ecos, ruído ou vibração
+// A média simples seria distorcida por 1 leitura ruim
+// A mediana descarta os extremos
+// ======================================================
+int comparaFloat(const void* a, const void* b)
+{
+  float fa = *(float*)a;
+  float fb = *(float*)b;
+  return (fa > fb) - (fa < fb);
+}
+
+float medirDistancia(int trigPin, int echoPin)
+{
+  const int N = 7;
+  float amostras[N];
+  float vSom = velocidadeSom(); // cm/s
+
+  for (int i = 0; i < N; i++)
+  {
+    // Garante que o pino está baixo antes do pulso
+    digitalWrite(trigPin, LOW);
+    delayMicroseconds(4);
+
+    // Pulso de disparo
+    digitalWrite(trigPin, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(trigPin, LOW);
+
+    // Timeout de 25ms = ~4,3m de alcance máximo
+    long duracao = pulseIn(echoPin, HIGH, 25000);
+
+    if (duracao == 0)
+    {
+      // Timeout: nenhum eco recebido → distância grande (sem objeto)
+      amostras[i] = 999.0;
+    }
+    else
+    {
+      // distância = (duração × velocidade_som) / 2
+      // duracao em µs, vSom em m/s → converter para cm/µs: vSom/10000
+      amostras[i] = (duracao * vSom) / 20000.0;
+    }
+
+    delayMicroseconds(300); // pausa entre pulsos para evitar eco cruzado
+  }
+
+  // Ordena e retorna a mediana (elemento central)
+  qsort(amostras, N, sizeof(float), comparaFloat);
+  return amostras[N / 2]; // índice 3 de 7
+}
+
+// ======================================================
+// SETUP
+// ======================================================
+void setup()
+{
+  pinMode(TRIG1,  OUTPUT);
+  pinMode(ECHO1,  INPUT);
+  pinMode(TRIG2,  OUTPUT);
+  pinMode(ECHO2,  INPUT);
+  pinMode(BUZZER, OUTPUT);
+
+  lcd.init();
+  lcd.backlight();
+  Serial.begin(9600);
+
+  // Calcula e exibe a velocidade do som usada
+  float vs = velocidadeSom();
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("RADAR PREC. v2.0");
+  lcd.setCursor(0, 1);
+  lcd.print("Vsom=");
+  lcd.print(vs, 1);
+  lcd.print("m/s");
+
+  Serial.print("Velocidade do som: ");
+  Serial.print(vs, 2);
+  Serial.println(" m/s");
+  Serial.print("Distancia sensores: ");
+  Serial.print(DIST_SENSORES * 100.0, 1);
+  Serial.println(" cm");
+
+  delay(2500);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("AGUARDANDO...");
+}
+
+// ======================================================
+// LOOP
+// ======================================================
+void loop()
+{
+  float d1 = medirDistancia(TRIG1, ECHO1);
+  float d2 = medirDistancia(TRIG2, ECHO2);
+
+  unsigned long agora = micros();
+
+  // ==================================================
+  // SENSOR 1 — ENTRADA
+  // Detecta objeto se:
+  //   - distância dentro do limite
+  //   - ainda não estava detectado
+  //   - passou o debounce desde a última detecção
+  // ==================================================
+  if (d1 > 0.5 &&
+      d1 <= DIST_DETECCAO_CM &&
+      !passouSensor1 &&
+      (millis() - ultimaDetec1 > DEBOUNCE_MS))
+  {
+    tempoEntrada = micros();
+    passouSensor1 = true;
+    ultimaDetec1 = millis();
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(">>> SENSOR 1 <<<");
+    lcd.setCursor(0, 1);
+    lcd.print("Objeto entrando");
+
+    tone(BUZZER, 1800, 100);
+
+    Serial.println("--- Sensor 1 ativado ---");
+    Serial.print("Distancia: ");
+    Serial.print(d1, 2);
+    Serial.println(" cm");
+  }
+
+  // ==================================================
+  // SENSOR 2 — SAÍDA
+  // ==================================================
+  if (d2 > 0.5 &&
+      d2 <= DIST_DETECCAO_CM &&
+      passouSensor1 && !passouSensor2 &&
+      (millis() - ultimaDetec2 > DEBOUNCE_MS))
+  {
+    tempoSaida = micros();
+    passouSensor2 = true;
+    ultimaDetec2 = millis();
+
+    // -----------------------------------------------
+    // CÁLCULO DE TEMPO
+    // Subtração direta de unsigned long lida com
+    // overflow do micros() automaticamente
+    // -----------------------------------------------
+    unsigned long duracaoUS = tempoSaida - tempoEntrada;
+    float tempo = duracaoUS / 1000000.0; // converte para segundos
+
+    if (tempo < 0.0005) tempo = 0.0005; // mínimo físico razoável
+
+    // -----------------------------------------------
+    // VELOCIDADE
+    // v = d / t
+    // -----------------------------------------------
+    float velocidadeMS  = DIST_SENSORES / tempo;
+    float velocidadeKMH = velocidadeMS * 3.6;
+
+    // -----------------------------------------------
+    // ACELERAÇÃO ESTIMADA
+    // Sem velocidade inicial conhecida, usamos:
+    // v² = 2 × a × d  →  a = v² / (2 × d)
+    // (assume partida do repouso — estimativa conservadora)
+    // -----------------------------------------------
+    float aceleracao = (velocidadeMS * velocidadeMS) / (2.0 * DIST_SENSORES);
+
+    // -----------------------------------------------
+    // SERIAL — LOG COMPLETO
+    // -----------------------------------------------
+    Serial.println("================================");
+    Serial.print("Duracao:      ");
+    Serial.print(duracaoUS);
+    Serial.println(" us");
+    Serial.print("Tempo:        ");
+    Serial.print(tempo, 6);
+    Serial.println(" s");
+    Serial.print("Velocidade:   ");
+    Serial.print(velocidadeKMH, 3);
+    Serial.println(" km/h");
+    Serial.print("Velocidade:   ");
+    Serial.print(velocidadeMS, 4);
+    Serial.println(" m/s");
+    Serial.print("Aceleracao:   ");
+    Serial.print(aceleracao, 3);
+    Serial.println(" m/s^2 (estimada)");
+    Serial.print("Dist sensor1: ");
+    Serial.print(d1, 2);
+    Serial.println(" cm");
+    Serial.print("Dist sensor2: ");
+    Serial.print(d2, 2);
+    Serial.println(" cm");
+    Serial.println("================================");
+
+    // -----------------------------------------------
+    // ACIMA DA CAPACIDADE DO SENSOR
+    // -----------------------------------------------
+    if (velocidadeKMH > VEL_MAX_SENSOR_KMH)
+    {
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("LIMITE DO SENSOR");
+      lcd.setCursor(0, 1);
+      lcd.print(">");
+      lcd.print((int)VEL_MAX_SENSOR_KMH);
+      lcd.print("km/h impreciso");
+
+      for (int i = 0; i < 6; i++)
+      {
+        tone(BUZZER, 2800);
+        delay(100);
+        noTone(BUZZER);
+        delay(80);
+      }
+
+      delay(5000);
+    }
+
+    // -----------------------------------------------
+    // ACIMA DO LIMITE CONFIGURADO
+    // -----------------------------------------------
+    else if (velocidadeKMH > VEL_LIMITE_KMH)
+    {
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("VEL ALTA!");
+      lcd.setCursor(0, 1);
+      lcd.print(velocidadeKMH, 2);
+      lcd.print(" km/h");
+
+      tone(BUZZER, 2200);
+      delay(5000);
+      noTone(BUZZER);
+    }
+
+    // -----------------------------------------------
+    // LEITURA NORMAL — EXIBE RESULTADOS
+    // -----------------------------------------------
+    else
+    {
+      // Tela 1: Velocidade e tempo
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("V:");
+      lcd.print(velocidadeKMH, 2);
+      lcd.print(" km/h");
+      lcd.setCursor(0, 1);
+      lcd.print("t:");
+      lcd.print(tempo * 1000.0, 1); // exibe em ms
+      lcd.print("ms");
+
+      delay(3000);
+
+      // Tela 2: Aceleração
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Acel estimada:");
+      lcd.setCursor(0, 1);
+      lcd.print(aceleracao, 2);
+      lcd.print(" m/s2");
+
+      delay(2000);
+    }
+
+    // -----------------------------------------------
+    // RESET DO CICLO
+    // -----------------------------------------------
+    passouSensor1 = false;
+    passouSensor2 = false;
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("AGUARDANDO...");
+
+    delay(300);
+  }
+
+  // ==================================================
+  // RESET AUTOMÁTICO POR TIMEOUT
+  // Objeto detectou S1 mas nunca chegou ao S2
+  // ==================================================
+  if (passouSensor1 && ((micros() - tempoEntrada) > TIMEOUT_US))
+  {
+    passouSensor1 = false;
+    passouSensor2 = false;
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("TIMEOUT - RESET");
+    lcd.setCursor(0, 1);
+    lcd.print("S2 nao ativado");
+
+    Serial.println("TIMEOUT: Sensor 2 nao ativou. Reset.");
+
+    delay(1500);
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("AGUARDANDO...");
+  }
+
+  delay(5); // reduzido de 10ms para 5ms — mais responsivo
+}
